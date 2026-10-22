@@ -26,8 +26,18 @@ export const DEFAULTS = {
     count: 3,
     retriesPerAccount: 1,   // B: tiap retry = browser baru (full launch + swiftshader) — 1 retry cukup
     timeoutMs: 240000,
-    inboxProvider: "auto",   // auto | tempmail-lol | mail-tm | guerrillamail | supermail | tempmailc | temp-email-dev
-    inboxToken: "",          // tempmailc trial code (100 request) — isi di config.json lokal, jangan di-commit
+    inboxProvider: "worker", // worker (Cloudflare catch-all milik sendiri) | auto | tempmail-lol | mail-tm | guerrillamail | supermail | tempmailc | temp-email-dev
+    inboxToken: "",          // tempmailc trial code / bearer token inbox kalau provider butuh
+    // --- Worker email (catch-all) ---
+    // Base URL API worker, termasuk prefix /api. Kosong = default bawaan.
+    // Env override: TH_WORKER_API_BASE
+    workerApiBase: "",
+    // Domain catch-all yang dilayani worker (alamat dibuat <random>@domain ini).
+    // Env override: TH_WORKER_DOMAIN
+    workerDomain: "",
+    // Bearer token kalau worker dilindungi auth (opsional).
+    // Env override: TH_WORKER_TOKEN
+    workerToken: "",
     hybridOff: false,        // false = verify+mint pakai IP bawaan (recommended)
   },
   output: {

@@ -91,6 +91,25 @@ const PROMPTS = {
     parse: (v) => { const n = parseInt(v, 10); if (Number.isNaN(n) || n < 0) throw new Error("harus angka >= 0"); return n; },
     apply: (v) => { cfg.rotateip.target = v; saveConfig(); },
   },
+  workerApiBase: {
+    label: "Base URL API worker email (termasuk /api). Contoh: https://mail.domainku.workers.dev/api",
+    parse: (v) => {
+      const s = v.trim();
+      if (s && !/^https?:\/\//i.test(s)) throw new Error("harus diawali http:// atau https://");
+      return s;
+    },
+    apply: (v) => { cfg.worker.workerApiBase = v; saveConfig(); },
+  },
+  workerDomain: {
+    label: "Domain catch-all worker (alamat dibuat <random>@domain). Contoh: mimokota.site",
+    parse: (v) => v.trim().replace(/^@/, ""),
+    apply: (v) => { cfg.worker.workerDomain = v; saveConfig(); },
+  },
+  workerToken: {
+    label: "Bearer token worker (opsional, kosongkan kalau worker terbuka)",
+    parse: (v) => v.trim(),
+    apply: (v) => { cfg.worker.workerToken = v; saveConfig(); },
+  },
 };
 
 // ---------- summarize event ----------
@@ -140,6 +159,8 @@ function onKey(chunk) {
     if (ch === "s" || ch === "S") { if (farm) farm.stop(); }
     if (ch === "i" || ch === "I") { cfg.router.autoImport = !cfg.router.autoImport; saveConfig(); render(); continue; }
     if (ch === "r" || ch === "R") { cfg.proxy.autoStock = !cfg.proxy.autoStock; saveConfig(); render(); continue; }
+    if (ch === "w" || ch === "W") { enterPrompt("workerApiBase", cfg.worker.workerApiBase); continue; }
+    if (ch === "d" || ch === "D") { enterPrompt("workerDomain", cfg.worker.workerDomain); continue; }
     if (ch === "\r" || ch === "\n") { flushMenu(); continue; }
     if (ch >= "0" && ch <= "9") { menuBuf += ch; render(); }
   }
@@ -159,7 +180,7 @@ function handleMenu(n) {
     case 2: enterPrompt("proxyFile", cfg.proxy.file); break;
     case 3: enterPrompt("workerCount", String(cfg.worker.count)); break;
     case 4: {
-      const order = ["auto", "tempmail-lol", "mail-tm", "guerrillamail", "supermail", "tempmailc", "temp-email-dev"];
+      const order = ["worker", "auto", "tempmail-lol", "mail-tm", "guerrillamail", "supermail", "tempmailc", "temp-email-dev"];
       const i = order.indexOf(cfg.worker.inboxProvider);
       cfg.worker.inboxProvider = order[(i + 1) % order.length];
       saveConfig();
@@ -206,6 +227,12 @@ function poolCount() {
     if (!existsSync(p)) return 0;
     return readFileSync(p, "utf8").split(/\r?\n/).filter((l) => l.trim()).length;
   } catch { return 0; }
+}
+
+function workerLabel() {
+  const base = cfg.worker.workerApiBase || process.env.TH_WORKER_API_BASE || "(default)";
+  const dom = cfg.worker.workerDomain || process.env.TH_WORKER_DOMAIN || "(default)";
+  return `${dom} @ ${base}`;
 }
 
 function countKeys() {
@@ -282,7 +309,9 @@ function renderMenu() {
   s += ` 1. Proxy           ${cfg.proxy.enabled ? C.green + "ON " : C.red + "OFF"}${C.reset}${cfg.proxy.enabled ? ` (${poolCount()} proxy di pool)` : " (direct IP bawaan)"}\n`;
   s += ` 2. File proxy      ${trunc(cfg.proxy.file, Math.max(termWidth() - 20, 20))}\n`;
   s += ` 3. Jumlah worker   ${cfg.worker.count}\n`;
-  s += ` 4. Inbox provider  ${cfg.worker.inboxProvider}\n`;
+  s += ` 4. Inbox provider  ${cfg.worker.inboxProvider}${cfg.worker.inboxProvider.startsWith("worker") || cfg.worker.inboxProvider === "auto" ? C.gray + `  (${workerLabel()})` + C.reset : ""}\n`;
+  s += ` W. Worker API      ${trunc(cfg.worker.workerApiBase || "(default)", Math.max(termWidth() - 24, 20))}\n`;
+  s += ` D. Worker domain   ${trunc(cfg.worker.workerDomain || "(default)", Math.max(termWidth() - 24, 20))}\n`;
   s += ` I. Auto-import ke 9router         ${cfg.router.autoImport ? C.green + "ON" : C.red + "OFF"}${C.reset}\n`;
   s += ` R. Auto-restock proxy             ${cfg.proxy.autoStock ? C.green + "ON" : C.red + "OFF"}${C.reset}\n`;
   s += ` 6. Output keys     ${trunc(cfg.output.keysFile, Math.max(termWidth() - 20, 20))}\n`;

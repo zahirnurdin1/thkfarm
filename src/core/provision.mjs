@@ -120,11 +120,14 @@ async function attempt(browser, opts, attemptNo) {
     // Provider HTTP (auto/tempmail-lol/mail-tm/guerrillamail/custom) TIDAK butuh
     // browser — passing null berarti context inbox tidak pernah dibuat.
     // Cuma temp-email.dev yang butuh page.
-    const needsInboxPage = !["auto", "tempmail-lol", "mail-tm", "guerrillamail", "supermail", "tempmailc", "custom", "rest"].includes(opts.inboxProvider);
+    const needsInboxPage = !["worker", "cf-worker", "simpamail", "cloudflare", "auto", "tempmail-lol", "mail-tm", "guerrillamail", "supermail", "tempmailc", "custom", "rest"].includes(opts.inboxProvider);
     inbox = createInbox(opts.inboxProvider, needsInboxPage ? await ensureInboxPage() : null, {
       mailBaseUrl: opts.mailBaseUrl,
       mailboxDomain: opts.mailboxDomain,
       inboxToken: opts.inboxToken,
+      workerApiBase: opts.workerApiBase,
+      workerDomain: opts.workerDomain,
+      workerToken: opts.workerToken,
     });
     const created = await inbox.createInbox();
     email = created.address;

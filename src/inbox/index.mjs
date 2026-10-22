@@ -26,6 +26,7 @@
  * @module inbox
  */
 
+import { randomBytes } from "node:crypto";
 import { log } from "../utils/logger.mjs";
 import { randomEmailLocal, randomPassword } from "../utils/random.mjs";
 
@@ -35,15 +36,237 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export const VERIFY_LINK_RE =
   /https?:\/\/tokenharbor\.ai\/verify-email\?token=[A-Za-z0-9._~-]+/i;
 
+/** Fallback shapes (Supabase `token_hash=…&type=signup`, alternate hosts). */
+export const VERIFY_LINK_FALLBACK_RES = [
+  /https?:\/\/tokenharbor\.ai\/verify-email\?[^\s"'<>]*token_hash=[A-Za-z0-9._~-]+[^\s"'<>]*/i,
+  /https?:\/\/(?:auth\.)?tokenharbor\.ai\/auth\/[^\s"'<>]+/i,
+];
+
 /** Sender fragments that identify Token Harbor mail. */
 export const SENDER_HINTS = ["tokenharbor", "token harbor", "verify@tokenharbor.ai"];
 
 /** Pull the verification URL out of an arbitrary blob of text/markup. */
 export function extractVerificationLink(blob) {
   if (!blob) return null;
-  const m = String(blob).match(VERIFY_LINK_RE);
-  return m ? m[0] : null;
+  const s = String(blob);
+  const m = s.match(VERIFY_LINK_RE);
+  if (m) return m[0].replace(/&amp;$/i, "");
+  for (const re of VERIFY_LINK_FALLBACK_RES) {
+    const f = s.match(re);
+    if (f) return f[0].replace(/&amp;$/i, "");
+  }
+  return null;
 }
+
+/**
+ * Decode a quoted-printable MIME body to UTF-8 text (soft line breaks + `=XX`).
+ * Worker inboxes hand back the raw RFC822 message, which is QP-encoded.
+ */
+export function decodeQuotedPrintable(input) {
+  if (!input) return "";
+  const joined = String(input).replace(/=\r?\n/g, "");
+  const bytes = [];
+  for (let i = 0; i < joined.length; i++) {
+    const c = joined[i];
+    if (c === "=" && /[0-9A-Fa-f]{2}/.test(joined.slice(i + 1, i + 3))) {
+      bytes.push(parseInt(joined.slice(i + 1, i + 3), 16));
+      i += 2;
+    } else {
+      bytes.push(joined.charCodeAt(i) & 0xff);
+    }
+  }
+  return Buffer.from(bytes).toString("utf8");
+}
+
+/** Random lowercase-alphanumeric local-part tail. */
+function randomLocal(len = 12) {
+  const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
+  const raw = randomBytes(len);
+  let out = "";
+  for (let i = 0; i < len; i++) out += alphabet[raw[i] % alphabet.length];
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Cloudflare Worker catch-all inbox (default)
+// ---------------------------------------------------------------------------
+
+/**
+ * Generic reader for a catch-all inbox served by a Cloudflare Email Worker.
+ *
+ * The worker keeps every message it receives; the domain accepts ANY local-part,
+ * so the caller invents its own address and filters the shared list by
+ * recipient. Two calls are all it needs:
+ *
+ *   GET {apiBase}/emails      -> [{ id, from, to, receivedAt }]
+ *   GET {apiBase}/emails/:id  -> { id, from, to, headers, raw, receivedAt }
+ *
+ * `raw` is the full MIME message (quoted-printable), which we decode before
+ * scraping the verification link. Response shapes vary between worker builds,
+ * so arrays under `list` / `emails` / `data` / `messages` are all accepted, and
+ * a detail endpoint that is missing falls back to whatever the list row carries.
+ *
+ * Config (all optional, env overrides config.json):
+ *   workerApiBase / TH_WORKER_API_BASE   base URL incl. `/api`
+ *   workerDomain  / TH_WORKER_DOMAIN     catch-all domain for generated addresses
+ *   workerToken   / TH_WORKER_TOKEN      bearer token, only if the worker asks
+ *   mailBaseUrl   / mailboxDomain        aliases, so `--mail-base-url` works too
+ *
+ * @param {{workerApiBase?:string, workerDomain?:string, workerToken?:string,
+ *          mailBaseUrl?:string, mailboxDomain?:string, fetchImpl?:typeof fetch}} [cfg]
+ */
+export function createWorkerReader(cfg = {}) {
+  const env = process.env;
+  const apiBase = String(
+    cfg.workerApiBase || cfg.mailBaseUrl || env.TH_WORKER_API_BASE || DEFAULT_WORKER_API,
+  ).replace(/\/+$/, "");
+  const domain = String(
+    cfg.workerDomain || cfg.mailboxDomain || env.TH_WORKER_DOMAIN || DEFAULT_WORKER_DOMAIN,
+  ).replace(/^@/, "");
+  const bearer = cfg.workerToken || env.TH_WORKER_TOKEN || "";
+  const doFetch = cfg.fetchImpl || fetch;
+
+  let address = null;
+  let listPath = null; // resolved on first poll (probed once)
+
+  async function api(path) {
+    const headers = { accept: "application/json" };
+    if (bearer) headers.authorization = `Bearer ${bearer}`;
+    const res = await doFetch(`${apiBase}${path}`, { headers, signal: AbortSignal.timeout(20000) });
+    const text = await res.text();
+    let data;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = text;
+    }
+    if (!res.ok) {
+      const err = new Error(
+        `worker ${res.status} ${path}: ${typeof data === "string" ? data.slice(0, 160) : JSON.stringify(data).slice(0, 160)}`,
+      );
+      err.status = res.status;
+      throw err;
+    }
+    return data;
+  }
+
+  function rowsOf(data) {
+    if (Array.isArray(data)) return data;
+    for (const key of ["list", "emails", "messages", "items", "data", "results"]) {
+      const v = data?.[key];
+      if (Array.isArray(v)) return v;
+      if (Array.isArray(v?.emails)) return v.emails;
+    }
+    return [];
+  }
+
+  /** Probe the list endpoint once — different worker builds mount it differently. */
+  async function listEmails() {
+    if (listPath) return rowsOf(await api(listPath));
+    const candidates = ["/emails", "/messages", "/inbox", ""];
+    let lastErr = null;
+    for (const p of candidates) {
+      try {
+        const data = await api(p);
+        const rows = rowsOf(data);
+        if (rows.length || Array.isArray(data)) {
+          listPath = p;
+          return rows;
+        }
+        listPath = p;
+        return rows;
+      } catch (err) {
+        lastErr = err;
+        if (err.status !== 404) throw err;
+      }
+    }
+    throw lastErr || new Error("worker inbox: no list endpoint found");
+  }
+
+  return {
+    provider: `worker:${domain}`,
+
+    async createInbox() {
+      address = `farm${randomLocal(12)}@${domain}`;
+      log.info(`inbox ready: ${address} (worker ${apiBase})`);
+      return { address, provider: `worker:${domain}` };
+    },
+
+    /**
+     * Poll the worker for a Token Harbor verification link addressed to us.
+     * @param {string} _address
+     * @param {{timeout?:number}} [opts]
+     * @returns {Promise<string>}
+     */
+    async waitForVerificationLink(_address, opts = {}) {
+      const timeout = opts.timeout ?? 180000;
+      const deadline = Date.now() + timeout;
+      const needle = String(address || _address || "").toLowerCase();
+      const seen = new Set();
+
+      while (Date.now() < deadline) {
+        let rows;
+        try {
+          rows = await listEmails();
+        } catch (err) {
+          log.warn(`worker poll failed (${err.message}); retrying`);
+          await sleep(4000);
+          continue;
+        }
+
+        for (const m of rows) {
+          const id = m?.id ?? m?.mail_id ?? m?.messageId;
+          const to = String(m?.to ?? m?.recipient ?? m?.address ?? "").toLowerCase();
+          if (needle && to && !to.includes(needle)) continue;
+
+          const inline = `${m?.raw || ""} ${m?.body || ""} ${m?.text || ""} ${m?.html || ""}`;
+          const inlineLink = extractVerificationLink(decodeQuotedPrintable(inline));
+          if (inlineLink) return inlineLink;
+
+          if (!id) continue;
+          const key = String(id);
+          if (seen.has(key)) continue;
+
+          let full = null;
+          try {
+            full = await api(`${listPath || "/emails"}/${encodeURIComponent(key)}`);
+          } catch {
+            seen.add(key); // detail endpoint absent — nothing more to learn from this row
+            continue;
+          }
+          seen.add(key);
+
+          const blob = [
+            decodeQuotedPrintable(full?.raw || ""),
+            full?.text || "",
+            full?.html || "",
+            full?.body || "",
+            JSON.stringify(full?.headers || {}),
+            String(full?.subject || ""),
+            String(full?.from || ""),
+          ].join(" ");
+
+          const link = extractVerificationLink(blob);
+          if (link) {
+            log.ok(`verification link found for ${needle}`);
+            return link;
+          }
+        }
+        await sleep(4000);
+      }
+      throw new Error("timed out waiting for the Token Harbor verification email");
+    },
+
+    async close() {
+      /* nothing to tear down: the worker keeps mail server-side */
+    },
+  };
+}
+
+/** Cloudflare Worker inbox defaults (override in config.json / env). */
+export const DEFAULT_WORKER_API =
+  process.env.TH_WORKER_API_BASE || "https://simpamail.nmayanti3727572.workers.dev/api";
+export const DEFAULT_WORKER_DOMAIN = process.env.TH_WORKER_DOMAIN || "mimokota.site";
 
 // ---------------------------------------------------------------------------
 // temp-email.dev (browser-driven)
@@ -555,11 +778,14 @@ export function createTempMailCReader(opts = {}) {
 /**
  * Factory used by the orchestrator.
  *
- * @param {string} name  "temp-email-dev" | "custom" | "tempmail-lol" | "mail-tm" | "guerrillamail" | "supermail" | "tempmailc" | "auto"
+ * @param {string} name  "worker" | "temp-email-dev" | "custom" | "tempmail-lol" | "mail-tm" | "guerrillamail" | "supermail" | "tempmailc" | "auto"
  * @param {import('playwright').Page|null} page
  * @param {object} [opts]
  */
 export function createInbox(name, page, opts = {}) {
+  if (name === "worker" || name === "cf-worker" || name === "simpamail" || name === "cloudflare") {
+    return createWorkerReader(opts);
+  }
   if (name === "custom" || name === "rest") {
     if (!opts.mailBaseUrl) throw new Error("--inbox-provider custom requires --mail-base-url");
     return createRestReader({ baseUrl: opts.mailBaseUrl, domain: opts.mailboxDomain });
@@ -570,7 +796,13 @@ export function createInbox(name, page, opts = {}) {
   if (name === "supermail") return createSuperMailReader(opts);
   if (name === "tempmailc") return createTempMailCReader(opts);
   if (name === "auto") {
-    // Rotasi provider HTTP per akun untuk fresh pool domain.
+    // Worker catch-all dulu (domain sendiri, paling andal); fallback rotasi HTTP
+    // kalau domain worker belum di-set di config.
+    const hasWorker = Boolean(opts.workerDomain || opts.mailboxDomain || process.env.TH_WORKER_DOMAIN);
+    if (hasWorker) {
+      log.info("inbox auto -> worker");
+      return createWorkerReader(opts);
+    }
     const r = Math.random();
     let pick;
     if (r < 0.35) pick = "tempmail-lol";

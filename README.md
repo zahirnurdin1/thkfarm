@@ -46,7 +46,51 @@ node src/import-9router.mjs   # baca keys.txt + insert connection per key ke nod
 - **Hybrid flow** — signup lewat proxy, verify email + mint API key lewat **IP bawaan** (kombinasi yang menghasilkan key: anti-abuse signup + Vercel checkpoint lolos)
 - **Cooldown bertingkat** — proxy soft (90s), rate (30m/60m), banned permanen (3x) — pool awet
 - **Log event** di layar (ringkas) + **full logs** ke file, auto-clear tiap run
-- **Inbox multi-provider** — tempmail.lol, mail.tm, guerrillamail, temp-email.dev (auto milih random per akun)
+- **Inbox multi-provider** — **worker** (Cloudflare catch-all milik sendiri, default), tempmail.lol, mail.tm, guerrillamail, supermail, temp-email.dev, custom REST
+- **Worker email sendiri** — set base URL + domain catch-all (menu `W` / `D`, `config.json`, atau env `TH_WORKER_API_BASE` / `TH_WORKER_DOMAIN` / `TH_WORKER_TOKEN`), tanpa browser & tanpa signup
+
+## Inbox pakai worker email sendiri (default)
+
+Provider `worker` = catch-all inbox dari Cloudflare Email Worker milik kamu. Tidak
+butuh browser, tidak butuh signup: alamat dibuat sendiri (`farm<random>@domain`)
+karena domain worker menerima semua local-part, lalu pesan difilter berdasarkan
+penerima.
+
+Set endpoint + domain (pilih salah satu):
+
+```bash
+# 1. env (paling cepat, tidak tersimpan di repo)
+export TH_WORKER_API_BASE="https://mail.domainkamu.workers.dev/api"
+export TH_WORKER_DOMAIN="domainkamu.com"
+export TH_WORKER_TOKEN=""          # opsional, kalau worker pakai bearer auth
+
+# 2. menu TUI: W = base URL, D = domain (persist ke config.json)
+
+# 3. config.json
+# { "worker": { "inboxProvider": "worker",
+#               "workerApiBase": "https://mail.domainkamu.workers.dev/api",
+#               "workerDomain": "domainkamu.com",
+#               "workerToken": "" } }
+```
+
+Kontrak API yang diharapkan (kalau worker kamu beda bentuk, sesuaikan di
+`src/inbox/index.mjs` → `createWorkerReader`):
+
+```
+GET {base}/emails       -> [{ id, from, to, receivedAt }]
+GET {base}/emails/:id   -> { id, from, to, headers, raw, receivedAt }   # raw = MIME penuh
+```
+
+Yang ditangani otomatis: array telanjang atau dibungkus `list`/`emails`/`messages`/`data`,
+probe path `/emails` → `/messages` → `/inbox` → `/`, `raw` quoted-printable
+di-decode sebelum link `tokenharbor.ai/verify-email` diambil, plus fallback
+`token_hash=...`.
+
+Tes cepat tanpa browser (cek endpoint + decode + timeout):
+
+```bash
+node tests/worker-inbox.test.mjs
+```
 
 ## Setup (Windows RDP)
 
@@ -67,7 +111,9 @@ Menu interaktif:
  1. Proxy:           ON (328 proxy)
  2. File proxy:      pools/proxies.txt
  3. Worker:          3
- 4. Inbox provider:  auto
+ 4. Inbox provider:  worker
+ W. Worker API:      (default)
+ D. Worker domain:   (default)
  5. Hybrid:          ON
  6. Output keys:     keys.txt
  7. Output accounts: accounts.jsonl
