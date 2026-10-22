@@ -8,3 +8,7 @@ pools/*-banned.txt
 pools/*-cooldown.txt
 node_modules/
 *.log
+# kredensial proxy (plaintext user:pass) — jangan pernah ikut ke repo
+proxy.txt
+proxy-cooldown.txt
+pools/
